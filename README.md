@@ -82,6 +82,8 @@ railpulse-genai-challenge/
 | `feed_info` | feed_id (PK), feed_publisher_name, feed_version, feed_start_date, feed_end_date |
 
 > ⚠️ **Note:** `stops` has **no** `agency_id` column — never JOIN `stops` directly to `agency`.
+>
+> ⚠️ **Note:** No table above contains a delay column (e.g. `delay_seconds`, `actual_arrival`, or any real-time field). See [Known Limitations](#-known-limitations) — this directly affects the "worst average delay" example query and the weekly report generator.
 
 ---
 
@@ -152,7 +154,7 @@ Open the app at the URL shown in your terminal (e.g. `http://localhost:8501`).
 
 - "What are the stations in Namur?"
 - "What are the stations in Brussels?"
-- "Which platform at Brussels-Central had the worst average delay this morning?"
+- "Which platform at Brussels-Central had the worst average delay this morning?" *(requires delay data — see [Known Limitations](#-known-limitations))*
 - "List the top 5 routes with the most trips."
 
 ---
@@ -191,6 +193,8 @@ def validate_sql_query(query: str) -> tuple[bool, str]:
 - No `DROP`, `DELETE`, `UPDATE`, `INSERT`, `ALTER`, `TRUNCATE`, `EXEC`, or `GRANT`.
 - No multi-statement chaining via semicolons.
 
+> ⚠️ See [Known Limitations](#-known-limitations) — the function name here (`validate_sql_query`) does not match what `app.py` imports, and keyword/statement filtering alone doesn't verify which tables a query actually touches.
+
 ---
 
 ## 🧠 Prompt Engineering Highlights (`prompts.py`)
@@ -223,6 +227,35 @@ Produces `WEEKLY_EXECUTIVE_BRIEF.md` containing:
 - A table of the top 5 network delay anomalies (converted to minutes)
 - Consultant-style operational recommendations (platform re-allocation, dwell-time optimization, etc.)
 
+> ⚠️ Depends on delay data existing in `railpulse.db` — see [Known Limitations](#-known-limitations).
+
+---
+
+## ⚠️ Known Limitations
+
+These are open risks that have **not been independently verified** against the running code and database. They're listed here deliberately, ahead of submission, so reviewers (and future-me) know exactly what "done" does and doesn't mean yet.
+
+- **Delay-data coverage is unconfirmed.** The schema documented above is static GTFS only — no `delay_seconds`, `actual_arrival`, or other real-time/delay column appears in any listed table. The example query *"Which platform had the worst average delay this morning?"*, the delay-to-minutes conversion described under Prompt Engineering, and `generate_report.py`'s "top 5 delay anomalies" all assume this data exists somewhere. It has not been confirmed that it does. Verify with:
+  ```bash
+  sqlite3 railpulse.db ".schema stop_times"
+  ```
+  If no delay-related column turns up anywhere in the DB, these features will either fail outright or the LLM will hallucinate a plausible-sounding column name.
+
+- **Guardrail function name mismatch (possible import error).** `app.py` imports `is_safe_query` from `guardrails.py`; the function shown in this README is named `validate_sql_query`. Whichever name is actually defined in the live file, the other reference is stale and one of the two will break on import. Confirm with:
+  ```bash
+  grep -n "^def " guardrails.py
+  ```
+
+- **Guardrail is keyword/regex-based, not AST-based.** It checks for forbidden keywords and a leading `SELECT`/`WITH`, but does not parse the query to verify which tables are actually referenced in `FROM`/`JOIN`. A query can pass validation while still reading unintended tables (e.g. schema metadata) via a comment or subquery trick. Treat this as a partial mitigation, not a hard security boundary, until it's replaced with real SQL parsing (e.g. `sqlglot`).
+
+- **No enforced row limit in code.** `LIMIT` is requested via prompt instruction only (e.g. "add LIMIT 20"); nothing in `guardrails.py` or `db_connector.py` enforces a cap if the model omits it.
+
+- **Few-shot examples are static, not dynamic.** The brief asks for "dynamic" few-shot prompting (examples selected/rotated based on the incoming question); the current implementation always injects the same fixed examples regardless of query.
+
+- **Unit conversion (seconds → minutes) is prompt-enforced, not code-enforced.** Correctness depends on the LLM doing the arithmetic correctly rather than a deterministic transform (e.g. `df['delay_min'] = df['delay_sec'] / 60`) applied in pandas before the value ever reaches the model.
+
+- **Raw exception messages may leak internal details.** Errors from `execute_query` (e.g. a malformed query slipping past the guardrail) are currently surfaced to the user as the raw exception string, which can expose schema or file-path information.
+
 ---
 
 ## 🩹 Troubleshooting Notes
@@ -232,12 +265,14 @@ Produces `WEEKLY_EXECUTIVE_BRIEF.md` containing:
 | `SyntaxError: invalid syntax` in `prompts.py` | Mismatched or extra `"""` triple-quote characters | Ensure every multi-line string starts and ends with exactly **three** double quotes |
 | `no such table: stops` | `db_connector.py` points to an empty auto-created `.db` file | Confirm the correct filename via `python3 check_tables.py` and update `DB_FILE` |
 | `ImportError: cannot import name 'CONSULTANT_PROMPT_TEMPLATE'` | Variable missing or `prompts.py` not saved | Ensure the file is saved (no unsaved-changes dot on the VS Code tab) and both variables are defined |
+| `ImportError: cannot import name 'is_safe_query'` | `guardrails.py` actually defines `validate_sql_query` (or vice versa) | Align the function name in `guardrails.py` with what `app.py` imports — see Known Limitations |
 | Query returns only one Brussels station | Search only matched `%Brussels%`, missing French/Dutch names, plus duplicate platform rows | Add multi-language `OR` clauses and `SELECT DISTINCT` + parent-station filter (see Prompt Engineering above) |
 | `Security Alert: Query blocked` | Model generated a non-`SELECT` query, or stale conversation context confused a small local model | Clear chat / restart Streamlit; consider testing with Groq's larger hosted model to confirm the prompt itself is correct |
 | Terminal flooded with `ModuleNotFoundError: No module named 'torchvision'` | Streamlit's file watcher inspects unrelated `transformers` vision submodules | Run with `--server.fileWatcherType=none`, or `pip install torchvision` |
 | `Import tabulate failed` | Missing `tabulate` package used for Markdown table formatting | `pip3 install tabulate` |
 | Changes to `prompts.py` don't take effect | Streamlit caches imported Python modules in memory | Clear cache (menu → *Clear cache*) and/or restart the server: `Ctrl+C` then `streamlit run app.py` |
 | `python: command not found` on macOS | macOS uses `python3` by default | Use `python3 script.py` instead of `python script.py` |
+| "Worst average delay" query fails or returns a hallucinated column | No delay column exists in the current schema | See Known Limitations — confirm with `sqlite3 railpulse.db ".schema stop_times"` |
 
 ---
 
@@ -245,12 +280,25 @@ Produces `WEEKLY_EXECUTIVE_BRIEF.md` containing:
 
 - [x] Local & free LLM integration (Ollama `llama3` or Groq free tier)
 - [x] Deterministic Text-to-SQL translation with schema-aware prompting
-- [x] Metric conversion (seconds → minutes) in consultant responses
+- [ ] Metric conversion (seconds → minutes) — *prompt-enforced only, not code-enforced; see Known Limitations*
 - [x] Interactive Streamlit chat portal
-- [x] SQL guardrails blocking `DROP` / `DELETE` / `UPDATE` / `INSERT`
-- [x] Few-shot prompting tuned for an 8B parameter open-source model
-- [x] Automated weekly executive brief generator
-- [x] Verified end-to-end against real GTFS data in `railpulse.db`
+- [ ] SQL guardrails blocking `DROP` / `DELETE` / `UPDATE` / `INSERT` — *present, but keyword/regex-based rather than AST-based, and function naming needs to be reconciled with `app.py`; see Known Limitations*
+- [ ] Few-shot prompting tuned for an 8B parameter open-source model — *static examples only, not dynamic as specified in the brief*
+- [ ] Automated weekly executive brief generator — *implemented, but contingent on delay data that hasn't been confirmed to exist*
+- [ ] Verified end-to-end against real GTFS data in `railpulse.db` — *not yet confirmed; the schema shown has no delay column, and the core example query depends on one*
+
+---
+
+## 🔧 Recommendations Before Submission
+
+Given limited time remaining, in priority order:
+
+1. **Resolve the delay-data question first — it blocks the core must-have.** Run `sqlite3 railpulse.db ".schema stop_times"` (and check `trips`/other tables) to see if a delay column exists anywhere under a different name. If it does, update the schema table above to document it. If it genuinely doesn't exist, either (a) derive a quick proxy delay metric from what's available, or (b) scope the example query and checklist claim down to something the schema actually supports — a smaller working demo beats a demo that fails live on its own example question.
+2. **Fix the guardrail function name mismatch.** Confirm which name (`is_safe_query` or `validate_sql_query`) is actually defined in `guardrails.py` and make sure it matches what `app.py` imports, or the app won't start.
+3. **If time allows, harden the guardrail** to check actual `FROM`/`JOIN` targets rather than keyword/substring matching, and add a hard `LIMIT` fallback in code (e.g. truncate the result DataFrame regardless of what SQL ran).
+4. **Move unit conversion into code.** Compute `delay_min` in pandas rather than relying on the LLM to convert seconds to minutes correctly — small, deterministic, removes a source of hallucinated arithmetic.
+5. **Lowest priority: dynamic few-shot selection.** Nice differentiator per the brief's wording, but not worth spending remaining time on relative to the items above.
+6. **Before final submission, run the exact example queries listed in this README** end-to-end and confirm the outputs, rather than relying on the checklist as a proxy for "it works."
 
 ---
 
