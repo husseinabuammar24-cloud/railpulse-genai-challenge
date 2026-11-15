@@ -13,12 +13,27 @@ ALLOWED_TABLES = [
 ]
 
 def clean_sql_query(raw_llm_output: str) -> str:
-    """Extracts raw SQL block from LLM markdown response."""
+    """Extract one SQL statement from model output and discard wrappers/comments."""
     sql = raw_llm_output.strip()
-    if "```sql" in sql:
-        sql = sql.split("```sql")[1].split("```")[0]
-    elif "```" in sql:
-        sql = sql.split("```")[1].split("```")[0]
+    code_block = re.search(r"```(?:sql)?\s*(.*?)```", sql, flags=re.IGNORECASE | re.DOTALL)
+    if code_block:
+        sql = code_block.group(1)
+
+    # Remove markdown emphasis that some models add around SQL function names.
+    sql = re.sub(r"\*\*(.*?)\*\*", r"\1", sql, flags=re.DOTALL)
+    sql = sql.replace("`", "").strip()
+
+    # Ignore model notes (including fact-ID comments) before the SQL statement.
+    statement_start = re.search(r"\b(?:SELECT|WITH)\b", sql, flags=re.IGNORECASE)
+    if not statement_start:
+        return sql.strip()
+    sql = sql[statement_start.start():]
+
+    # Remove SQL comments, then keep only the first statement.
+    sql = re.sub(r"(?m)^\s*--[^\n]*", "", sql)
+    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+    if ";" in sql:
+        sql = sql.split(";", 1)[0] + ";"
     return sql.strip()
 
 def is_safe_query(sql_query: str) -> tuple[bool, str]:
