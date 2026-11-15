@@ -575,6 +575,82 @@ def render_fact_catalog_table(facts, source_sql, trace_id):
             st.code(source_sql, language="sql")
         row[4].markdown(f"`{fact['expression']}`")
 
+
+def render_saved_analysis(message):
+    """Rebuild the complete result view when a fact button triggers a Streamlit rerun."""
+    sql_query = message["source_sql"]
+    facts = message["facts"]
+    trace_id = message["trace_id"]
+    results = pd.DataFrame(
+        message["query_rows"], columns=message["query_columns"]
+    )
+    annotated_results = annotate_result_frame(results, facts)
+
+    st.markdown("**Generated Query:**")
+    st.code(sql_query, language="sql")
+    comparison_view = station_comparison_view(results, facts)
+    if comparison_view:
+        comparison_rows, chart_rows, comparison_metrics = comparison_view
+        st.markdown("### Station comparison")
+        st.caption("Counts are from the executed SQL; fact IDs link each value to its source calculation.")
+        st.dataframe(comparison_rows, hide_index=True, use_container_width=True)
+        chart_columns = st.columns(len(comparison_metrics))
+        for index, metric in enumerate(comparison_metrics):
+            with chart_columns[index]:
+                st.caption(metric)
+                chart_data = pd.DataFrame([
+                    {"Station": row["Station"], metric: row[metric]}
+                    for row in chart_rows if row.get(metric) is not None
+                ])
+                st.bar_chart(chart_data, x="Station", y=metric)
+        with st.expander("Raw SQL result row"):
+            st.dataframe(annotated_results, use_container_width=True)
+    else:
+        st.markdown("**Query Results:**")
+        st.dataframe(annotated_results, use_container_width=True)
+
+    feed_metadata = pd.DataFrame(
+        message["feed_metadata_rows"], columns=message["feed_metadata_columns"]
+    )
+    st.markdown("**GTFS feed coverage:**")
+    if feed_metadata.empty:
+        st.caption("The database does not provide feed_info metadata.")
+    else:
+        st.dataframe(feed_metadata, use_container_width=True)
+    with st.expander("Feed metadata source SQL"):
+        st.code(message["feed_metadata_sql"], language="sql")
+
+    matched_stops_sql = message.get("matched_stops_sql")
+    if matched_stops_sql:
+        matched_stops = pd.DataFrame(
+            message["matched_stops_rows"], columns=message["matched_stops_columns"]
+        )
+        st.markdown("**Matched stop records (station scope):**")
+        if matched_stops.empty:
+            st.caption("No stop records matched the query's stop-name filters.")
+        else:
+            st.dataframe(matched_stops, use_container_width=True)
+        with st.expander("Matched stop scope source SQL"):
+            st.code(matched_stops_sql, language="sql")
+
+    st.markdown("### Traceability Fact IDs")
+    if len(facts) <= 12:
+        render_fact_catalog_table(facts, sql_query, f"{trace_id}-catalog")
+    else:
+        with st.expander("Show Traceability Fact IDs"):
+            render_fact_catalog_table(facts, sql_query, f"{trace_id}-catalog")
+
+    if message["traceability_status"].startswith("PASS"):
+        st.success("Fact ID check passed: citations match the query result values.")
+    else:
+        st.warning(
+            "Fact ID check needs review. Unmatched numbers are marked unverified; "
+            "compare the remaining IDs with the fact catalog."
+        )
+    st.markdown("---")
+    st.markdown("### 💡 RailPulse Tactical Briefing")
+    st.markdown(message["content"])
+
 # --- Page Config ---
 st.set_page_config(
     page_title="RailPulse AI | Station Manager Co-Pilot",
@@ -614,19 +690,10 @@ if "messages" not in st.session_state:
 # Render chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if message.get("facts") and message.get("source_sql"):
-            history_trace_id = message.get("trace_id") or f"history-{id(message)}"
-            catalog_trace_id = f"{history_trace_id}-catalog"
-            if len(message["facts"]) <= 12:
-                render_fact_catalog_table(
-                    message["facts"], message["source_sql"], catalog_trace_id
-                )
-            else:
-                with st.expander("Show Traceability Fact IDs"):
-                    render_fact_catalog_table(
-                        message["facts"], message["source_sql"], catalog_trace_id
-                    )
+        if message.get("analysis"):
+            render_saved_analysis(message)
+        else:
+            st.markdown(message["content"])
 
 # User Input
 if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delays..."):
@@ -830,10 +897,20 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                         }
                         if not df_results.empty:
                             assistant_message.update({
+                                "analysis": True,
                                 "fact_answer": response_text,
                                 "facts": numeric_facts,
                                 "source_sql": sql_query,
                                 "trace_id": trace_id,
+                                "query_rows": df_results.to_dict(orient="records"),
+                                "query_columns": list(df_results.columns),
+                                "feed_metadata_rows": feed_metadata.to_dict(orient="records"),
+                                "feed_metadata_columns": list(feed_metadata.columns),
+                                "feed_metadata_sql": feed_metadata_sql,
+                                "matched_stops_rows": matched_stops.to_dict(orient="records"),
+                                "matched_stops_columns": list(matched_stops.columns),
+                                "matched_stops_sql": matched_stops_sql,
+                                "traceability_status": traceability_status,
                             })
                         st.session_state.messages.append(assistant_message)
 
