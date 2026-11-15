@@ -76,12 +76,14 @@ NUMERIC TRACEABILITY IS REQUIRED:
 - Do not describe aggregate schedule counts as per-day/per-week values unless the SQL explicitly filters or normalizes by that period.
 - Do not guess transport modes (bus, tram, metro, rail) unless `route_type` is included in the query results.
 - Do not infer passenger volumes, crowding, peak-period demand, or capacity risk from scheduled-trip counts.
+- Do not recommend additional staffing, platform changes, or service changes based only on scheduled-trip or route counts.
+- Keep a station review to the queried measurements, their dataset/time scope, one limitation, and a cautious next step. Avoid repeating the same figures in multiple recommendations.
 - Write quantitative values as digits so the app can validate and attach row/column citations.
 - Use bullets for recommendations, not numbered list markers.
 
 IMPORTANT: If delay values or durations are present in SECONDS, explicitly convert and discuss them in MINUTES (e.g., 300 seconds = 5 minutes).
 
-Provide a brief, actionable "Tactical Recommendation" for station management based on the findings.
+Give only a short interpretation or next step when the results support one. Avoid generic, repeated recommendations and do not force a station-management recommendation for unrelated queries.
 
 If the query asks for the biggest or busiest stations, describe the measure as scheduled trips, not passenger volume; GTFS does not contain ridership counts.
 """

@@ -283,15 +283,78 @@ def station_comparison_view(result_frame, facts):
     return display_rows, chart_frame, ordered_metrics
 
 
-def format_station_comparison_briefing():
-    """Use validated query results for comparisons instead of model-generated numbers."""
+def format_station_comparison_briefing(chart_rows, metrics):
+    """Summarize only comparisons directly supported by the displayed result cells."""
+    leads = []
+    for metric in metrics:
+        ranked = sorted(chart_rows, key=lambda row: row.get(metric) or 0, reverse=True)
+        if len(ranked) < 2 or ranked[0].get(metric) == ranked[1].get(metric):
+            continue
+        metric_name = metric.lower()
+        leads.append(f"{ranked[0]['Station']} has more {metric_name} than {ranked[1]['Station']}")
+
+    comparison = " and ".join(leads) if leads else "the queried stations have equal counts"
     return (
-        "**Comparison**\n\n"
-        "The station counts are shown above with fact IDs linked to their source calculations. "
-        "They describe scheduled identifiers in this GTFS feed, not daily passenger volumes.\n\n"
-        "**Tactical recommendation**\n\n"
-        "Use these counts to compare scheduled service coverage. Check ridership and operational "
-        "performance data before making staffing or capacity decisions."
+        f"**Comparison**\n\nIn this GTFS feed, {comparison}. "
+        "These are feed-level scheduled identifiers, not daily operating totals or passenger counts.\n\n"
+        "**Planning note**\n\nUse this as a schedule-coverage comparison. Check date-specific service, "
+        "ridership, and operations data before making staffing or capacity decisions."
+    )
+
+
+def format_station_review_briefing(sql_query, result_frame, facts):
+    """Create a concise, cited review when the result contains station trip/route counts."""
+    if result_frame.empty or len(result_frame) != 1:
+        return None
+
+    station_columns = {"station", "station_name", "stop_name", "location"}
+    station_column = next(
+        (column for column in result_frame.columns if str(column).lower() in station_columns),
+        None,
+    )
+    if station_column:
+        station_names = result_frame[station_column].dropna().astype(str).unique()
+        if len(station_names) != 1:
+            return None
+        station_name = station_names[0]
+    else:
+        names = re.findall(
+            r"\bstop_name\s+LIKE\s+'%([^%']+)%'",
+            sql_query,
+            flags=re.IGNORECASE,
+        )
+        if len(names) != 1:
+            return None
+        station_name = names[0]
+
+    fact_by_cell = {(fact["row"], fact["alias"]): fact for fact in facts}
+    aliases = {
+        "scheduled trip IDs": ("distinct_trips", "distinct_scheduled_trips", "total_trips", "trip_count", "scheduled_trips"),
+        "distinct route IDs": ("distinct_routes", "total_routes", "route_count"),
+    }
+    values = []
+    for description, candidates in aliases.items():
+        column = next(
+            (candidate for candidate in result_frame.columns if str(candidate).lower() in candidates),
+            None,
+        )
+        if column is None:
+            continue
+        fact = fact_by_cell.get((1, str(column).lower()))
+        if fact:
+            number = fact["normalized"]
+            formatted = f"{int(number):,}" if number == number.to_integral_value() else str(number)
+            values.append(f"{formatted} [{fact['id']}] {description}")
+
+    if not values:
+        return None
+    metrics = " and ".join(values)
+    return (
+        f"**{station_name} station**\n\nThe matching GTFS records contain {metrics}. "
+        "These are feed-level schedule identifiers; this query does not establish a per-day count "
+        "or measure ridership, delays, crowding, or capacity.\n\n"
+        "**Planning note**\n\nUse the counts as schedule-coverage context. Consult date-specific service, "
+        "ridership, and operations data before making staffing or capacity decisions."
     )
 
 
@@ -577,7 +640,7 @@ def render_fact_catalog_table(facts, source_sql, trace_id):
 
 
 def render_saved_analysis(message):
-    """Rebuild the complete result view when a fact button triggers a Streamlit rerun."""
+    """Rebuild the useful result view when a fact button triggers a Streamlit rerun."""
     sql_query = message["source_sql"]
     facts = message["facts"]
     trace_id = message["trace_id"]
@@ -586,13 +649,13 @@ def render_saved_analysis(message):
     )
     annotated_results = annotate_result_frame(results, facts)
 
-    st.markdown("**Generated Query:**")
-    st.code(sql_query, language="sql")
+    with st.expander("View generated SQL"):
+        st.code(sql_query, language="sql")
     comparison_view = station_comparison_view(results, facts)
     if comparison_view:
         comparison_rows, chart_rows, comparison_metrics = comparison_view
         st.markdown("### Station comparison")
-        st.caption("Counts are from the executed SQL; fact IDs link each value to its source calculation.")
+        st.caption("Each value includes a fact ID. Click a value in the fact catalog for its calculation and source.")
         st.dataframe(comparison_rows, hide_index=True, use_container_width=True)
         chart_columns = st.columns(len(comparison_metrics))
         for index, metric in enumerate(comparison_metrics):
@@ -603,34 +666,32 @@ def render_saved_analysis(message):
                     for row in chart_rows if row.get(metric) is not None
                 ])
                 st.bar_chart(chart_data, x="Station", y=metric)
-        with st.expander("Raw SQL result row"):
-            st.dataframe(annotated_results, use_container_width=True)
     else:
         st.markdown("**Query Results:**")
         st.dataframe(annotated_results, use_container_width=True)
 
-    feed_metadata = pd.DataFrame(
-        message["feed_metadata_rows"], columns=message["feed_metadata_columns"]
-    )
-    st.markdown("**GTFS feed coverage:**")
-    if feed_metadata.empty:
-        st.caption("The database does not provide feed_info metadata.")
-    else:
-        st.dataframe(feed_metadata, use_container_width=True)
-    with st.expander("Feed metadata source SQL"):
-        st.code(message["feed_metadata_sql"], language="sql")
-
-    matched_stops_sql = message.get("matched_stops_sql")
-    if matched_stops_sql:
-        matched_stops = pd.DataFrame(
-            message["matched_stops_rows"], columns=message["matched_stops_columns"]
+    with st.expander("View source rows and dataset scope"):
+        st.markdown("**Executed result rows**")
+        st.dataframe(annotated_results, use_container_width=True)
+        feed_metadata = pd.DataFrame(
+            message["feed_metadata_rows"], columns=message["feed_metadata_columns"]
         )
-        st.markdown("**Matched stop records (station scope):**")
-        if matched_stops.empty:
-            st.caption("No stop records matched the query's stop-name filters.")
+        st.markdown("**GTFS feed snapshot**")
+        if feed_metadata.empty:
+            st.caption("No feed metadata is available.")
         else:
-            st.dataframe(matched_stops, use_container_width=True)
-        with st.expander("Matched stop scope source SQL"):
+            st.dataframe(feed_metadata, use_container_width=True)
+
+        matched_stops_sql = message.get("matched_stops_sql")
+        if matched_stops_sql:
+            matched_stops = pd.DataFrame(
+                message["matched_stops_rows"], columns=message["matched_stops_columns"]
+            )
+            st.markdown("**Matched stop records**")
+            if matched_stops.empty:
+                st.caption("No stop records matched the query's name filters.")
+            else:
+                st.dataframe(matched_stops, use_container_width=True)
             st.code(matched_stops_sql, language="sql")
 
     st.markdown("### Traceability Fact IDs")
@@ -641,14 +702,11 @@ def render_saved_analysis(message):
             render_fact_catalog_table(facts, sql_query, f"{trace_id}-catalog")
 
     if message["traceability_status"].startswith("PASS"):
-        st.success("Fact ID check passed: citations match the query result values.")
+        st.success("Numeric citations match the SQL result values.")
     else:
-        st.warning(
-            "Fact ID check needs review. Unmatched numbers are marked unverified; "
-            "compare the remaining IDs with the fact catalog."
-        )
+        st.warning("Some numeric claims could not be matched to result facts. Review the briefing.")
     st.markdown("---")
-    st.markdown("### 💡 RailPulse Tactical Briefing")
+    st.markdown("### Analysis")
     st.markdown(message["content"])
 
 # --- Page Config ---
@@ -664,6 +722,12 @@ st.caption("Intelligent GTFS Transit Analytics & Conversational Insights for SNC
 # --- Sidebar Configuration ---
 with st.sidebar:
     st.header("⚙️ Provider Settings")
+    if st.button("Clear chat"):
+        st.session_state.messages = []
+        for state_key in list(st.session_state):
+            if str(state_key).startswith("catalog-drilldown-"):
+                del st.session_state[state_key]
+        st.rerun()
     provider = st.radio("LLM Backend", ["Groq (Cloud Free API)", "Ollama (Local)"])
     
     if provider == "Groq (Cloud Free API)":
@@ -722,8 +786,8 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                 
                     sql_query = clean_sql_query(raw_sql)
                 
-                    st.markdown("**Generated Query:**")
-                    st.code(sql_query, language="sql")
+                    with st.expander("View generated SQL"):
+                        st.code(sql_query, language="sql")
 
                     is_safe, reason = is_safe_query(sql_query)
                     if not is_safe:
@@ -763,13 +827,11 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                             df_results = execute_query(repaired_sql)
                             sql_query = repaired_sql
                             st.info("The first query used unsupported SQL syntax. It was corrected for SQLite.")
-                            st.markdown("**SQLite-corrected query:**")
-                            st.code(sql_query, language="sql")
 
                         numeric_facts = build_numeric_facts(sql_query, df_results)
                         fact_catalog = format_fact_catalog(numeric_facts)
                         trace_id = uuid4().hex[:10]
-                        feed_metadata, feed_metadata_sql = get_feed_metadata()
+                        feed_metadata, _ = get_feed_metadata()
                         matched_stops, matched_stops_sql = get_station_scope(sql_query)
                         feed_metadata_text = (
                             feed_metadata.to_markdown(index=False)
@@ -791,7 +853,7 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                             if comparison_view:
                                 comparison_rows, chart_rows, comparison_metrics = comparison_view
                                 st.markdown("### Station comparison")
-                                st.caption("Counts are from the executed SQL; fact IDs link each value to its source calculation.")
+                                st.caption("Each value includes a fact ID. Click a value in the fact catalog for its calculation and source.")
                                 st.dataframe(comparison_rows, hide_index=True, use_container_width=True)
                                 chart_columns = st.columns(len(comparison_metrics))
                                 for index, metric in enumerate(comparison_metrics):
@@ -803,28 +865,25 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                                             if row.get(metric) is not None
                                         ])
                                         st.bar_chart(chart_data, x="Station", y=metric)
-                                with st.expander("Raw SQL result row"):
-                                    st.dataframe(annotated_results, use_container_width=True)
                             else:
                                 st.markdown("**Query Results:**")
                                 st.dataframe(annotated_results, use_container_width=True)
                             result_text = df_results.to_markdown(index=False)
 
-                            st.markdown("**GTFS feed coverage:**")
-                            if feed_metadata.empty:
-                                st.caption("The database does not provide feed_info metadata.")
-                            else:
-                                st.dataframe(feed_metadata, use_container_width=True)
-                            with st.expander("Feed metadata source SQL"):
-                                st.code(feed_metadata_sql, language="sql")
-
-                            if matched_stops_sql:
-                                st.markdown("**Matched stop records (station scope):**")
-                                if matched_stops.empty:
-                                    st.caption("No stop records matched the query's stop-name filters.")
+                            with st.expander("View source rows and dataset scope"):
+                                st.markdown("**Executed result rows**")
+                                st.dataframe(annotated_results, use_container_width=True)
+                                st.markdown("**GTFS feed snapshot**")
+                                if feed_metadata.empty:
+                                    st.caption("No feed metadata is available.")
                                 else:
-                                    st.dataframe(matched_stops, use_container_width=True)
-                                with st.expander("Matched stop scope source SQL"):
+                                    st.dataframe(feed_metadata, use_container_width=True)
+                                if matched_stops_sql:
+                                    st.markdown("**Matched stop records**")
+                                    if matched_stops.empty:
+                                        st.caption("No stop records matched the query's name filters.")
+                                    else:
+                                        st.dataframe(matched_stops, use_container_width=True)
                                     st.code(matched_stops_sql, language="sql")
 
                             if numeric_facts:
@@ -840,7 +899,14 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                                         )
 
                             if comparison_view:
-                                advice_text = format_station_comparison_briefing()
+                                advice_text = format_station_comparison_briefing(
+                                    chart_rows, comparison_metrics
+                                )
+                                has_unverified_values = False
+                            elif station_review_briefing := format_station_review_briefing(
+                                sql_query, df_results, numeric_facts
+                            ):
+                                advice_text = station_review_briefing
                                 has_unverified_values = False
                             else:
                                 consultant_prompt = CONSULTANT_PROMPT_TEMPLATE.format(
@@ -864,31 +930,30 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                                     "or did not match its fact ID."
                                 )
                                 st.warning(
-                                    "Fact ID check needs review. Unmatched numbers are marked unverified; "
-                                    "compare the remaining IDs with the fact catalog."
+                                    "Some numeric claims could not be matched to result facts. "
+                                    "Review the briefing."
                                 )
                             else:
                                 traceability_status = (
                                     "PASS: each displayed numeric value matches the result value for its cited fact ID."
                                 )
-                                st.success("Fact ID check passed: citations match the query result values.")
+                                st.success("Numeric citations match the SQL result values.")
                         
                             st.markdown("---")
-                            st.markdown("### 💡 RailPulse Tactical Briefing")
+                            st.markdown("### Analysis")
                             st.markdown(advice_text)
                         
                             response_text = advice_text
 
                         report_content = (
-                            f"Source SQL (reproducible query):\n{sql_query}\n\n"
-                            f"Query Result Rows (source data):\n{result_text}\n\n"
-                            f"GTFS Feed Metadata Source SQL:\n{feed_metadata_sql}\n"
-                            f"GTFS Feed Metadata Rows:\n{feed_metadata_text}\n\n"
-                            f"Matched Stop Scope SQL:\n{matched_stops_sql or 'Not available: no stop-name LIKE filters found.'}\n"
-                            f"Matched Stop Scope Rows:\n{matched_stops_text}\n\n"
-                            f"Traceability Fact Catalog:\n{fact_catalog}\n\n"
-                            f"Fact ID Validation:\n{traceability_status if not df_results.empty else 'No result rows to validate.'}\n\n"
-                            f"Analysis with verified fact IDs:\n{response_text}"
+                            f"Question:\n{user_prompt}\n\n"
+                            f"Source SQL:\n{sql_query}\n\n"
+                            f"Result rows:\n{result_text}\n\n"
+                            f"GTFS feed snapshot:\n{feed_metadata_text}\n\n"
+                            f"Matched stop records:\n{matched_stops_text}\n\n"
+                            f"Fact catalog:\n{fact_catalog}\n\n"
+                            f"Citation check:\n{traceability_status if not df_results.empty else 'No result rows to validate.'}\n\n"
+                            f"Analysis:\n{response_text}"
                         )
                         assistant_message = {
                             "role": "assistant",
@@ -906,7 +971,6 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                                 "query_columns": list(df_results.columns),
                                 "feed_metadata_rows": feed_metadata.to_dict(orient="records"),
                                 "feed_metadata_columns": list(feed_metadata.columns),
-                                "feed_metadata_sql": feed_metadata_sql,
                                 "matched_stops_rows": matched_stops.to_dict(orient="records"),
                                 "matched_stops_columns": list(matched_stops.columns),
                                 "matched_stops_sql": matched_stops_sql,
