@@ -444,16 +444,18 @@ def build_distinct_value_query(source_sql, fact):
             if clause_match:
                 clause_start = index
                 if clause_match.group(0).upper().startswith("GROUP"):
-                    group_start = index + clause_match.end()
+                    # Pattern.match(..., index) returns absolute match positions.
+                    group_start = clause_match.end()
                     group_end_match = re.search(
                         r"\b(?:HAVING|ORDER\s+BY|LIMIT)\b",
                         from_clause[group_start:],
                         flags=re.IGNORECASE,
                     )
-                    group_text = from_clause[
-                        group_start:group_start + group_end_match.start()
+                    group_end = (
+                        group_start + group_end_match.start()
                         if group_end_match else len(from_clause)
-                    ]
+                    )
+                    group_text = from_clause[group_start:group_end]
 
                     # Split the GROUP BY list on top-level commas only.
                     item_start = nesting = 0
