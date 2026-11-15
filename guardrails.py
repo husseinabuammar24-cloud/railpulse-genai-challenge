@@ -1,62 +1,131 @@
 import re
+import sqlite3
 
-# Block data-modifying SQL statements
-FORBIDDEN_KEYWORDS = [
-    r"\bDROP\b", r"\bDELETE\b", r"\bUPDATE\b", r"\bINSERT\b", 
-    r"\bALTER\b", r"\bTRUNCATE\b", r"\bGRANT\b", r"\bREVOKE\b",
-    r"\bEXEC\b", r"\bEXECUTE\b"
-]
 
-ALLOWED_TABLES = [
-    "agency", "routes", "trips", "stop_times", "stops", 
-    "transfers", "calendar", "calendar_dates", "translations", "feed_info"
-]
+ALLOWED_TABLES = frozenset({
+    "agency", "routes", "trips", "stop_times", "stops",
+    "transfers", "calendar", "calendar_dates", "translations", "feed_info",
+})
+
+FORBIDDEN_KEYWORDS = re.compile(
+    r"\b(?:ATTACH|DETACH|ALTER|CREATE|DELETE|DROP|INSERT|REPLACE|REINDEX|"
+    r"RELEASE|RENAME|REPLACE|REVOKE|SAVEPOINT|TRUNCATE|UPDATE|VACUUM|"
+    r"GRANT|EXEC|EXECUTE)\b",
+    flags=re.IGNORECASE,
+)
+BLOCKED_FUNCTIONS = frozenset({"load_extension", "readfile", "writefile"})
+
+
+def _mask_literals_and_comments(sql: str) -> str:
+    """Blank out strings, quoted identifiers, and comments for lexical checks."""
+    chars = list(sql)
+    index = 0
+    length = len(sql)
+
+    while index < length:
+        char = sql[index]
+        next_char = sql[index + 1] if index + 1 < length else ""
+
+        if char == "-" and next_char == "-":
+            end = sql.find("\n", index + 2)
+            end = length if end == -1 else end
+            for position in range(index, end):
+                if chars[position] != "\n":
+                    chars[position] = " "
+            index = end
+            continue
+
+        if char == "/" and next_char == "*":
+            end = sql.find("*/", index + 2)
+            end = length if end == -1 else end + 2
+            for position in range(index, end):
+                if chars[position] != "\n":
+                    chars[position] = " "
+            index = end
+            continue
+
+        if char in "'\"`[":
+            closing = "]" if char == "[" else char
+            chars[index] = " "
+            index += 1
+            while index < length:
+                current = sql[index]
+                chars[index] = " " if current != "\n" else "\n"
+                if current == closing:
+                    # SQL escapes quote delimiters by doubling them.
+                    if index + 1 < length and sql[index + 1] == closing:
+                        chars[index + 1] = " "
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+
+        index += 1
+
+    return "".join(chars)
+
 
 def clean_sql_query(raw_llm_output: str) -> str:
-    """Extract one SQL statement from model output and discard wrappers/comments."""
-    sql = raw_llm_output.strip()
+    """Extract SQL from model formatting without silently truncating statements."""
+    sql = (raw_llm_output or "").strip()
     code_block = re.search(r"```(?:sql)?\s*(.*?)```", sql, flags=re.IGNORECASE | re.DOTALL)
     if code_block:
-        sql = code_block.group(1)
+        sql = code_block.group(1).strip()
 
-    # Remove markdown emphasis that some models add around SQL function names.
+    # Some models bold SQL functions; remove the formatting but preserve quoted SQL.
     sql = re.sub(r"\*\*(.*?)\*\*", r"\1", sql, flags=re.DOTALL)
-    sql = sql.replace("`", "").strip()
+    masked = _mask_literals_and_comments(sql)
+    statement_start = re.search(r"\b(?:SELECT|WITH)\b", masked, flags=re.IGNORECASE)
+    if statement_start:
+        sql = sql[statement_start.start():].strip()
+    return sql
 
-    # Ignore model notes (including fact-ID comments) before the SQL statement.
-    statement_start = re.search(r"\b(?:SELECT|WITH)\b", sql, flags=re.IGNORECASE)
-    if not statement_start:
-        return sql.strip()
-    sql = sql[statement_start.start():]
-
-    # Remove SQL comments, then keep only the first statement.
-    sql = re.sub(r"(?m)^\s*--[^\n]*", "", sql)
-    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
-    if ";" in sql:
-        sql = sql.split(";", 1)[0] + ";"
-    return sql.strip()
 
 def is_safe_query(sql_query: str) -> tuple[bool, str]:
-    """Validates SQL query against security policies."""
-    clean_sql = sql_query.upper().strip()
+    """Reject non-read queries; execution also enforces a SQLite authorizer."""
+    if not isinstance(sql_query, str) or not sql_query.strip():
+        return False, "Query is empty."
 
-    # Must start with SELECT or WITH (for CTEs)
-    if not (clean_sql.startswith("SELECT") or clean_sql.startswith("WITH")):
-        return False, "Query must strictly be a SELECT or WITH statement."
+    masked = _mask_literals_and_comments(sql_query)
+    if not re.match(r"\s*(?:SELECT|WITH)\b", masked, flags=re.IGNORECASE):
+        return False, "Query must begin with SELECT or WITH."
 
-    # Check forbidden keywords
-    for pattern in FORBIDDEN_KEYWORDS:
-        if re.search(pattern, clean_sql):
-            return False, f"Forbidden keyword detected matching pattern: {pattern}"
+    semicolons = [index for index, char in enumerate(masked) if char == ";"]
+    if len(semicolons) > 1:
+        return False, "Only one SQL statement is allowed."
+    if semicolons and masked[semicolons[0] + 1:].strip():
+        return False, "Only one SQL statement is allowed."
 
-    # Basic check ensuring referenced tables match the GTFS schema
-    found_table = False
-    for table in ALLOWED_TABLES:
-        if table.upper() in clean_sql:
-            found_table = True
-            break
-    
-    if not found_table:
-        return False, "Query does not target valid GTFS database tables."
+    forbidden = FORBIDDEN_KEYWORDS.search(masked)
+    if forbidden:
+        return False, f"Forbidden SQL operation: {forbidden.group(0).upper()}."
 
-    return True, "Safe"
+    return True, "Read-only query accepted; SQLite authorizer will enforce table access."
+
+
+def install_readonly_authorizer(connection: sqlite3.Connection) -> None:
+    """Restrict SQLite execution to reads from approved GTFS tables."""
+
+    def authorize(action, argument1, argument2, database_name, _trigger_name):
+        if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_RECURSIVE):
+            return sqlite3.SQLITE_OK
+
+        if action == sqlite3.SQLITE_READ:
+            table = (argument1 or "").lower()
+            database = (database_name or "").lower()
+            if database == "main" and table in ALLOWED_TABLES:
+                return sqlite3.SQLITE_OK
+            return sqlite3.SQLITE_DENY
+
+        if action == sqlite3.SQLITE_FUNCTION:
+            function = (argument2 or argument1 or "").lower()
+            if function in BLOCKED_FUNCTIONS:
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        # Deny writes, schema changes, PRAGMA, ATTACH/DETACH, and other actions.
+        return sqlite3.SQLITE_DENY
+
+    connection.set_authorizer(authorize)

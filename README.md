@@ -160,7 +160,7 @@ GTFS feeds can differ in optional columns and conventions. In particular, `stops
 
 ## Safety and limitations
 
-The app is a learning project, not a production-hardened database agent. `guardrails.py` permits queries beginning with `SELECT` or `WITH`, rejects several data-modification keywords, and checks for known GTFS table names. These are regex/string checks—not a SQL parser or a complete security boundary. Do not connect this app to a sensitive database or rely on the checks to protect untrusted data. Use a read-only database account/file and review generated SQL and results.
+The app is a learning project, not a production-hardened database agent. `guardrails.py` checks for a single `SELECT` or `WITH` statement and installs a SQLite authorizer that permits reads only from approved GTFS tables while denying writes, schema changes, and other SQLite actions. This is a stronger execution boundary than keyword checks alone, but the app still executes LLM-generated queries and is not a substitute for a separately isolated, read-only database or production security review. Review generated SQL and results.
 
 Other important limitations:
 
@@ -177,7 +177,7 @@ Other important limitations:
 | `no such table` or an empty result unexpectedly | Confirm `DATABASE_PATH` points to the intended GTFS database and that it contains the expected tables. |
 | Groq API error | Check the key, account access, network connection, and the selected model availability. |
 | Ollama connection/model error | Confirm Ollama is running, the configured URL is reachable, and the selected model has been pulled. |
-| SQL safety check blocks a query | Inspect the generated SQL in the app. The basic checks may reject a query containing a blocked keyword even when it appears in another context. |
+| SQL safety check blocks a query | Inspect the generated SQL in the app. The app permits reads only from approved GTFS tables; unsupported tables and SQLite actions are rejected during execution. |
 | `tabulate` import error | Run `pip install tabulate` in the active virtual environment. |
 | Streamlit file-watcher noise | Launch with `--server.fileWatcherType=none` as shown above. |
 

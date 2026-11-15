@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 import pandas as pd
+from guardrails import install_readonly_authorizer
 
 # Path to your SQLite database file
 DB_FILE = os.getenv("DATABASE_PATH", "railpulse.db")
@@ -12,7 +13,9 @@ LIMIT 1"""
 
 def get_connection():
     """Establishes connection to the SQLite database."""
-    return sqlite3.connect(DB_FILE)
+    connection = sqlite3.connect(DB_FILE)
+    install_readonly_authorizer(connection)
+    return connection
 
 def execute_query(sql_query: str) -> pd.DataFrame:
     """Executes a validated SELECT query and returns results as a DataFrame."""
