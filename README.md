@@ -152,13 +152,11 @@ GTFS feeds can differ in optional columns and conventions. In particular, `stops
 ├── guardrails.py           # SQL cleanup and basic safety checks
 ├── prompts.py              # GTFS-aware SQL and analysis prompts
 ├── check_tables.py         # Lists tables in railpulse.db
-├── verify_namur_counts.py  # Optional check of known Namur feed-level counts
 ├── ERD.webp                # GTFS entity-relationship diagram
 ├── requirements.txt        # Python dependencies
 └── README.md
 ```
 
-`verify_namur_counts.py` also reads the database path from `DATABASE_PATH` (default: `railpulse.db`). It compares distinct trip and route counts for stop records matching `Namur` with the expected values embedded in that script. Treat those expected values as a dataset-specific check, not as a guarantee for other GTFS feeds.
 
 ## Safety and limitations
 
@@ -185,7 +183,7 @@ Other important limitations:
 
 ## Development notes
 
-The repository includes small utility scripts for inspecting the SQLite tables and checking a dataset-specific Namur count. There is no automated test suite currently documented in the repository. When changing query behavior, test the app against a disposable, representative GTFS database and review both generated SQL and output.
+The repository includes a utility script for inspecting the SQLite tables. There is no automated test suite currently documented in the repository. When changing query behavior, test the app against a disposable, representative GTFS database and review both generated SQL and output.
 
 ## License
 
