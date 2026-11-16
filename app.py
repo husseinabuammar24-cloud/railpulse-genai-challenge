@@ -302,6 +302,119 @@ def format_station_comparison_briefing(chart_rows, metrics):
     )
 
 
+def render_station_comparison_report(comparison_rows, facts, report_key):
+    """Show an editable, source-linked draft report for a station comparison."""
+    if len(comparison_rows) < 2:
+        return
+
+    stations = [row["Station"] for row in comparison_rows]
+    metric_names = [
+        name for name in comparison_rows[0]
+        if name != "Station" and any(row.get(name) not in (None, "—") for row in comparison_rows)
+    ]
+    fact_by_id = {fact["id"]: fact for fact in facts}
+    number_pattern = re.compile(r"^\s*([\d,]+(?:\.\d+)?)\s+\[(F\d+)\]\s*$")
+    report_rows = []
+    summary_sentences = []
+
+    for metric in metric_names:
+        metric_values = []
+        for row in comparison_rows:
+            match = number_pattern.match(str(row.get(metric, "")))
+            if not match or match.group(2) not in fact_by_id:
+                continue
+            numeric_value = Decimal(match.group(1).replace(",", ""))
+            fact_id = match.group(2)
+            metric_values.append((row["Station"], numeric_value, match.group(1), fact_id))
+            report_rows.append({
+                "Station": row["Station"],
+                "Metric": metric,
+                "Value": match.group(1),
+                "Source": fact_id,
+            })
+
+        if len(metric_values) >= 2:
+            high = max(metric_values, key=lambda item: item[1])
+            low = min(metric_values, key=lambda item: item[1])
+            if high[1] == low[1]:
+                summary_sentences.append(
+                    f"{high[0]} and {low[0]} have the same {metric.lower()}: "
+                    f"{high[2]} [{high[3]}] [{low[3]}]."
+                )
+            else:
+                summary_sentences.append(
+                    f"{high[0]} has {high[2]} [{high[3]}] {metric.lower()} compared with "
+                    f"{low[0]} at {low[2]} [{low[3]}]."
+                )
+
+    summary = " ".join(summary_sentences) or (
+        "The comparison has no pair of numeric metrics with traceable Fact IDs."
+    )
+    draft_key = f"{report_key}-draft"
+    edit_key = f"{report_key}-editing"
+    reviewed_key = f"{report_key}-reviewed"
+    st.session_state.setdefault(draft_key, summary)
+    st.session_state.setdefault(edit_key, False)
+    st.session_state.setdefault(reviewed_key, False)
+
+    with st.container(border=True):
+        title_column, status_column = st.columns([4, 1])
+        title_column.markdown(
+            f"### Draft report: {stations[0]} vs {stations[1]}, schedule comparison"
+        )
+        status_column.markdown(
+            "**Reviewed**" if st.session_state[reviewed_key] else "**Draft, not approved**"
+        )
+        st.markdown("#### Scheduled service by station")
+        if report_rows:
+            st.dataframe(pd.DataFrame(report_rows), hide_index=True, use_container_width=True)
+        else:
+            st.info("No numeric comparison values with Fact IDs are available for this report.")
+
+        st.markdown("**Summary**")
+        st.write(st.session_state[draft_key])
+        st.caption(
+            "GTFS schedule counts are feed-level identifiers; they do not show ridership, "
+            "daily service, delays, crowding, or capacity."
+        )
+
+        edit_column, check_column, review_column = st.columns(3)
+        if edit_column.button("Edit draft", key=f"{report_key}-edit-button"):
+            st.session_state[edit_key] = not st.session_state[edit_key]
+        if facts and check_column.button("Check a number", key=f"{report_key}-check-button"):
+            st.session_state[f"{report_key}-show-check"] = not st.session_state.get(
+                f"{report_key}-show-check", False
+            )
+        review_label = "Mark as reviewed" if not st.session_state[reviewed_key] else "Undo review"
+        if review_column.button(review_label, key=f"{report_key}-review-button"):
+            st.session_state[reviewed_key] = not st.session_state[reviewed_key]
+
+        if st.session_state[edit_key]:
+            st.text_area("Edit the draft summary", key=draft_key, height=110)
+            if st.button("Save draft", key=f"{report_key}-save-button"):
+                st.session_state[edit_key] = False
+                st.rerun()
+            if verify_fact_ids(st.session_state[draft_key], facts):
+                st.success("Numbers in the edited summary match their cited Fact IDs.")
+            else:
+                st.warning("The edited summary has a number without a matching Fact ID.")
+
+        if st.session_state.get(f"{report_key}-show-check") and facts:
+            fact_ids = [fact["id"] for fact in facts]
+            selected_id = st.selectbox(
+                "Choose a Fact ID to inspect",
+                fact_ids,
+                key=f"{report_key}-fact-picker",
+            )
+            selected_fact = fact_by_id[selected_id]
+            st.write(f"Result value: **{selected_fact['value']}**")
+            st.code(selected_fact["expression"], language="sql")
+            st.caption(
+                f"Result row {selected_fact['row']}, column `{selected_fact['column']}`. "
+                "Use the source SQL and result rows above to verify the query scope."
+            )
+
+
 def format_station_review_briefing(sql_query, result_frame, facts):
     """Create a concise, cited review when the result contains station trip/route counts."""
     if result_frame.empty or len(result_frame) != 1:
@@ -667,6 +780,7 @@ def render_saved_analysis(message):
                     for row in chart_rows if row.get(metric) is not None
                 ])
                 st.bar_chart(chart_data, x="Station", y=metric)
+        render_station_comparison_report(comparison_rows, facts, f"report-{trace_id}")
     else:
         st.markdown("**Query Results:**")
         st.dataframe(annotated_results, use_container_width=True)
@@ -726,7 +840,7 @@ with st.sidebar:
     if st.button("Clear chat"):
         st.session_state.messages = []
         for state_key in list(st.session_state):
-            if str(state_key).startswith("catalog-drilldown-"):
+            if str(state_key).startswith(("catalog-drilldown-", "report-")):
                 del st.session_state[state_key]
         st.rerun()
     provider = st.radio("LLM Backend", ["Groq (Cloud API)", "Ollama (Local)"], index=0)
@@ -867,6 +981,9 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                                             if row.get(metric) is not None
                                         ])
                                         st.bar_chart(chart_data, x="Station", y=metric)
+                                render_station_comparison_report(
+                                    comparison_rows, numeric_facts, f"report-{trace_id}"
+                                )
                             else:
                                 st.markdown("**Query Results:**")
                                 st.dataframe(annotated_results, use_container_width=True)

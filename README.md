@@ -11,6 +11,7 @@ RailPulse AI is a Streamlit-based assistant for exploring Belgian railway schedu
 - Checks generated SQL before execution and uses a SQLite authorizer to limit database access to read operations on approved GTFS tables.
 - Shows results, source SQL, feed/station scope, and numeric fact IDs. Click a fact value to inspect its calculation and, for distinct counts, list the values counted.
 - Supports station comparisons with tables and charts when results have compatible station and count columns.
+- Builds an editable draft comparison report with Fact ID sources, a number-check panel, and a local reviewed status.
 - Provides concise fact-backed summaries for supported station counts and comparisons; other result types use an LLM-generated interpretation.
 - Drafts source-linked station reviews from query results. The full chat transcript can be exported as a PDF.
 - Provides **Clear chat** to start a fresh session.
@@ -34,6 +35,12 @@ Try asking:
 > Give me a brief review of Namur station using the GTFS results. Cite every number and state what the data does not tell us.
 
 The app drafts an analysis with a short, Fact-ID-cited summary at the top, followed by the review, data limitations, and a cautious planning note. Inspect the source sections and Fact IDs in the app before relying on the draft. You can export the full conversation with **Download chat as PDF**.
+
+To practice a split-comparison-style report, ask:
+
+> Compare Namur and Schaerbeek by distinct scheduled trips and distinct route IDs. Give me a draft report with a short summary.
+
+The report card shows the station metric values and Fact IDs, lets you edit the summary, and lets you inspect a selected fact's SQL expression. **Mark as reviewed** only changes the local draft status; it does not publish or share the report. This is a workflow example, not a semiconductor split analysis.
 
 ## Requirements
 
