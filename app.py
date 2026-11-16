@@ -21,6 +21,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 from guardrails import is_safe_query, clean_sql_query
 from db_connector import execute_query, get_feed_metadata, get_station_scope
 from prompts import SYSTEM_PROMPT, CONSULTANT_PROMPT_TEMPLATE
+from semantic_layer import build_station_comparison_query
 
 
 def make_chat_pdf(messages):
@@ -302,8 +303,11 @@ def format_station_comparison_briefing(chart_rows, metrics):
     )
 
 
-def render_station_comparison_report(comparison_rows, facts, report_key):
-    """Show an editable, source-linked draft report for a station comparison."""
+def render_station_comparison_report(
+    comparison_rows, facts, report_key, source_sql, feed_metadata,
+    query_origin, semantic_version,
+):
+    """Add and render a source-linked station comparison report slide."""
     if len(comparison_rows) < 2:
         return
 
@@ -350,24 +354,45 @@ def render_station_comparison_report(comparison_rows, facts, report_key):
     summary = " ".join(summary_sentences) or (
         "The comparison has no pair of numeric metrics with traceable Fact IDs."
     )
+    slides = st.session_state.setdefault("draft_report_slides", {})
+    if st.button("Add to report", key=f"{report_key}-add-button"):
+        feed_snapshot = (
+            feed_metadata.iloc[0].to_dict()
+            if feed_metadata is not None and not feed_metadata.empty else {}
+        )
+        slides[report_key] = {
+            "title": f"{stations[0]} vs {stations[1]}, schedule comparison",
+            "summary": summary,
+            "source_sql": source_sql,
+            "rows": report_rows,
+            "feed_snapshot": feed_snapshot,
+            "query_origin": query_origin,
+            "semantic_version": semantic_version,
+            "facts": facts,
+            "reviewed": False,
+        }
+
+    slide = slides.get(report_key)
+    if not slide:
+        return
+
     draft_key = f"{report_key}-draft"
     edit_key = f"{report_key}-editing"
     reviewed_key = f"{report_key}-reviewed"
     st.session_state.setdefault(draft_key, summary)
     st.session_state.setdefault(edit_key, False)
-    st.session_state.setdefault(reviewed_key, False)
+    st.session_state.setdefault(reviewed_key, slide["reviewed"])
+    slide["summary"] = st.session_state[draft_key]
 
     with st.container(border=True):
         title_column, status_column = st.columns([4, 1])
-        title_column.markdown(
-            f"### Draft report: {stations[0]} vs {stations[1]}, schedule comparison"
-        )
+        title_column.markdown(f"### Draft report: {slide['title']}")
         status_column.markdown(
-            "**Reviewed**" if st.session_state[reviewed_key] else "**Draft, not approved**"
+            "**Reviewed locally**" if st.session_state[reviewed_key] else "**Draft, not approved**"
         )
         st.markdown("#### Scheduled service by station")
-        if report_rows:
-            st.dataframe(pd.DataFrame(report_rows), hide_index=True, use_container_width=True)
+        if slide["rows"]:
+            st.dataframe(pd.DataFrame(slide["rows"]), hide_index=True, use_container_width=True)
         else:
             st.info("No numeric comparison values with Fact IDs are available for this report.")
 
@@ -377,6 +402,21 @@ def render_station_comparison_report(comparison_rows, facts, report_key):
             "GTFS schedule counts are feed-level identifiers; they do not show ridership, "
             "daily service, delays, crowding, or capacity."
         )
+        snapshot = slide["feed_snapshot"]
+        version_parts = [
+            str(snapshot.get(key)) for key in
+            ("feed_publisher_name", "feed_version", "feed_start_date", "feed_end_date")
+            if snapshot.get(key) not in (None, "", "nan")
+        ]
+        st.caption(
+            f"Data version: {' · '.join(version_parts) if version_parts else 'feed version unavailable'}"
+        )
+        st.caption(
+            f"Query source: {slide['query_origin']}"
+            + (f" · {slide['semantic_version']}" if slide["semantic_version"] else "")
+        )
+        with st.expander("View the query and data source used for this slide"):
+            st.code(slide["source_sql"], language="sql")
 
         edit_column, check_column, review_column = st.columns(3)
         if edit_column.button("Edit draft", key=f"{report_key}-edit-button"):
@@ -388,6 +428,7 @@ def render_station_comparison_report(comparison_rows, facts, report_key):
         review_label = "Mark as reviewed" if not st.session_state[reviewed_key] else "Undo review"
         if review_column.button(review_label, key=f"{report_key}-review-button"):
             st.session_state[reviewed_key] = not st.session_state[reviewed_key]
+            slide["reviewed"] = st.session_state[reviewed_key]
 
         if st.session_state[edit_key]:
             st.text_area("Edit the draft summary", key=draft_key, height=110)
@@ -763,7 +804,12 @@ def render_saved_analysis(message):
     )
     annotated_results = annotate_result_frame(results, facts)
 
-    with st.expander("View generated SQL"):
+    is_semantic_query = message.get("semantic_version") is not None
+    if is_semantic_query:
+        st.info(
+            f"Governed semantic query · {message.get('semantic_version')}"
+        )
+    with st.expander("View governed semantic query" if is_semantic_query else "View generated SQL"):
         st.code(sql_query, language="sql")
     comparison_view = station_comparison_view(results, facts)
     if comparison_view:
@@ -780,7 +826,19 @@ def render_saved_analysis(message):
                     for row in chart_rows if row.get(metric) is not None
                 ])
                 st.bar_chart(chart_data, x="Station", y=metric)
-        render_station_comparison_report(comparison_rows, facts, f"report-{trace_id}")
+        metadata = pd.DataFrame(
+            message.get("feed_metadata_rows", []),
+            columns=message.get("feed_metadata_columns", []),
+        )
+        render_station_comparison_report(
+            comparison_rows,
+            facts,
+            f"report-{trace_id}",
+            sql_query,
+            metadata,
+            message.get("query_origin", "LLM-generated SQL"),
+            message.get("semantic_version"),
+        )
     else:
         st.markdown("**Query Results:**")
         st.dataframe(annotated_results, use_container_width=True)
@@ -839,6 +897,7 @@ with st.sidebar:
     st.header("⚙️ Provider Settings")
     if st.button("Clear chat"):
         st.session_state.messages = []
+        st.session_state.pop("draft_report_slides", None)
         for state_key in list(st.session_state):
             if str(state_key).startswith(("catalog-drilldown-", "report-")):
                 del st.session_state[state_key]
@@ -889,21 +948,34 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
         else:
             with st.spinner("Generating SQL query..."):
                 try:
-                    llm = get_llm()
-                
                     # Ignore the export-format clause during SQL generation.
                     sql_question = remove_pdf_export_request(user_prompt) or user_prompt
-                    messages = [
-                        SystemMessage(content=SYSTEM_PROMPT),
-                        HumanMessage(content=sql_question)
-                    ]
-                    raw_sql_response = llm.invoke(messages)
-                    raw_sql = raw_sql_response.content if hasattr(raw_sql_response, 'content') else str(raw_sql_response)
-                
-                    sql_query = clean_sql_query(raw_sql)
-                
-                    with st.expander("View generated SQL"):
-                        st.code(sql_query, language="sql")
+                    semantic_query = build_station_comparison_query(sql_question)
+                    semantic_version = None
+                    if semantic_query:
+                        llm = None
+                        sql_query = semantic_query.sql
+                        query_origin = semantic_query.semantic_name
+                        semantic_version = semantic_query.version
+                        st.info(
+                            f"Using governed semantic layer: {query_origin} "
+                            f"({semantic_version}). The approved template limits the query to station "
+                            "schedule metrics."
+                        )
+                        with st.expander("View governed semantic query"):
+                            st.code(sql_query, language="sql")
+                    else:
+                        llm = get_llm()
+                        messages = [
+                            SystemMessage(content=SYSTEM_PROMPT),
+                            HumanMessage(content=sql_question)
+                        ]
+                        raw_sql_response = llm.invoke(messages)
+                        raw_sql = raw_sql_response.content if hasattr(raw_sql_response, 'content') else str(raw_sql_response)
+                        sql_query = clean_sql_query(raw_sql)
+                        query_origin = "LLM-generated SQL"
+                        with st.expander("View generated SQL"):
+                            st.code(sql_query, language="sql")
 
                     is_safe, reason = is_safe_query(sql_query)
                     if not is_safe:
@@ -917,6 +989,10 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                         try:
                             df_results = execute_query(sql_query)
                         except Exception as sqlite_error:
+                            if llm is None:
+                                raise ValueError(
+                                    f"Governed semantic query failed; it was not rewritten: {sqlite_error}"
+                                ) from sqlite_error
                             repair_prompt = (
                                 "Repair the failed query for SQLite. Preserve the user's requested analysis. "
                                 "Use only SELECT/WITH SQL against the listed GTFS schema. "
@@ -982,7 +1058,13 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                                         ])
                                         st.bar_chart(chart_data, x="Station", y=metric)
                                 render_station_comparison_report(
-                                    comparison_rows, numeric_facts, f"report-{trace_id}"
+                                    comparison_rows,
+                                    numeric_facts,
+                                    f"report-{trace_id}",
+                                    sql_query,
+                                    feed_metadata,
+                                    query_origin,
+                                    semantic_version,
                                 )
                             else:
                                 st.markdown("**Query Results:**")
@@ -1085,6 +1167,8 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                                 "fact_answer": response_text,
                                 "facts": numeric_facts,
                                 "source_sql": sql_query,
+                                "query_origin": query_origin,
+                                "semantic_version": semantic_version,
                                 "trace_id": trace_id,
                                 "query_rows": df_results.to_dict(orient="records"),
                                 "query_columns": list(df_results.columns),
