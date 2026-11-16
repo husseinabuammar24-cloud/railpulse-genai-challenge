@@ -728,18 +728,19 @@ with st.sidebar:
             if str(state_key).startswith("catalog-drilldown-"):
                 del st.session_state[state_key]
         st.rerun()
-    provider = st.radio("LLM Backend", ["Groq (Cloud Free API)", "Ollama (Local)"], index=1)
+    provider = st.radio("LLM Backend", ["Groq (Cloud API)", "Ollama (Local)"], index=0)
     
-    if provider == "Groq (Cloud Free API)":
+    if provider == "Groq (Cloud API)":
         api_key = st.text_input("Groq API Key", type="password", value=os.getenv("GROQ_API_KEY", ""))
-        model_name = st.selectbox("Model", ["openai/gpt-oss-20b"])
+        groq_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+        model_name = st.selectbox("Model", groq_models, index=0)
     else:
         ollama_url = st.text_input("Ollama URL", value="http://localhost:11434")
         model_name = st.text_input("Local Model", value="qwen3.5:4b")
 
 # --- LLM Initialization ---
 def get_llm():
-    if provider == "Groq (Cloud Free API)":
+    if provider == "Groq (Cloud API)":
         if not api_key:
             st.error("Please enter a valid Groq API Key.")
             st.stop()
