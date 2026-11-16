@@ -16,7 +16,7 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, TableStyle
 
 from guardrails import is_safe_query, clean_sql_query
 from db_connector import execute_query, get_feed_metadata, get_station_scope
@@ -59,6 +59,109 @@ def make_chat_pdf(messages):
         story.append(Paragraph(content or " ", body_style))
         story.append(Spacer(1, 4))
 
+    document.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def make_review_pdf(message):
+    """Create a source-linked review report from one executed analysis."""
+    buffer = BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=15 * mm,
+        leftMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm,
+        title="RailPulse Station Review",
+    )
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle(
+        "ReportBody", parent=styles["BodyText"], fontSize=8, leading=11,
+        wordWrap="CJK", spaceAfter=4,
+    )
+    cell = ParagraphStyle("ReportCell", parent=body, fontSize=7, leading=9)
+    story = [
+        Paragraph("RailPulse GTFS Review Report", styles["Title"]),
+        Paragraph(datetime.now().strftime("Generated %d %B %Y at %H:%M"), styles["Italic"]),
+        Spacer(1, 8),
+        Paragraph("Review question", styles["Heading2"]),
+        Paragraph(escape(str(message.get("question", ""))), body),
+        Paragraph("Analysis", styles["Heading2"]),
+        Paragraph(
+            escape(re.sub(r"[*#`]", "", str(message.get("content", "")))).replace("\n", "<br/>"),
+            body,
+        ),
+        Paragraph("Source SQL", styles["Heading2"]),
+        Paragraph(escape(str(message.get("source_sql", ""))).replace("\n", "<br/>"), cell),
+    ]
+
+    def add_table(title, rows, columns, limit=40):
+        if not columns:
+            return
+        rows = list(rows or [])
+        if not rows:
+            return
+        if title:
+            story.append(Paragraph(title, styles["Heading2"]))
+        header = [Paragraph(f"<b>{escape(str(column))}</b>", cell) for column in columns]
+        data = [header]
+        for record in rows[:limit]:
+            data.append([
+                Paragraph(escape(str(record.get(column, ""))), cell)
+                for column in columns
+            ])
+        table = LongTable(data, repeatRows=1, hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF0F6")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#253858")),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D5DCE5")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(table)
+        if len(rows) > limit:
+            story.append(Paragraph(
+                f"Showing the first {limit} of {len(rows)} rows; use the app's source view for the full result.",
+                body,
+            ))
+        story.append(Spacer(1, 6))
+
+    add_table("Executed result rows", message.get("query_rows"), message.get("query_columns"))
+    add_table(
+        "Matched stop records",
+        message.get("matched_stops_rows"),
+        message.get("matched_stops_columns"),
+    )
+    add_table(
+        "GTFS feed snapshot",
+        message.get("feed_metadata_rows"),
+        message.get("feed_metadata_columns"),
+        limit=10,
+    )
+    facts = message.get("facts", [])
+    if facts:
+        story.append(Paragraph("Traceability facts", styles["Heading2"]))
+        fact_rows = [{
+            "Fact ID": fact["id"],
+            "Result row": fact["row"],
+            "Column": fact["column"],
+            "Value": fact["value"],
+            "SQL expression": fact["expression"],
+        } for fact in facts]
+        add_table(
+            "", fact_rows,
+            ["Fact ID", "Result row", "Column", "Value", "SQL expression"],
+            limit=100,
+        )
+    story.extend([
+        Paragraph("Citation check", styles["Heading2"]),
+        Paragraph(escape(str(message.get("traceability_status", "Not available"))), body),
+    ])
     document.build(story)
     buffer.seek(0)
     return buffer.getvalue()
@@ -960,6 +1063,7 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                             "role": "assistant",
                             "content": response_text,
                             "report_content": report_content,
+                            "question": user_prompt,
                         }
                         if not df_results.empty:
                             assistant_message.update({
@@ -984,6 +1088,19 @@ if user_prompt := st.chat_input("Ask about stations, schedules, routes, or delay
                     st.session_state.messages.append({"role": "assistant", "content": f"Error: {e}"})
 
 if st.session_state.messages:
+    latest_review = next(
+        (message for message in reversed(st.session_state.messages) if message.get("analysis")),
+        None,
+    )
+    if latest_review:
+        st.download_button(
+            "📄 Download latest review report as PDF",
+            data=make_review_pdf(latest_review),
+            file_name="railpulse-station-review.pdf",
+            mime="application/pdf",
+            key=f"review-pdf-{latest_review['trace_id']}",
+            use_container_width=True,
+        )
     st.download_button(
         "📄 Download chat as PDF",
         data=make_chat_pdf(st.session_state.messages),
