@@ -7,7 +7,7 @@ RailPulse AI is a Streamlit-based assistant for exploring Belgian railway schedu
 ## What it does
 
 - Accepts questions about stations, stops, routes, trips, and schedules in a Streamlit chat interface.
-- Uses the selected LLM provider to generate SQLite queries. Ollama is selected by default; Groq is an optional cloud provider.
+- Uses the selected LLM provider to generate SQLite queries. Groq is selected by default; Ollama is an optional local provider.
 - Checks generated SQL before execution and uses a SQLite authorizer to limit database access to read operations on approved GTFS tables.
 - Shows results, source SQL, feed/station scope, and numeric fact IDs. Click a fact value to inspect its calculation and, for distinct counts, list the values counted.
 - Supports station comparisons with tables and charts when results have compatible station and count columns.
@@ -29,8 +29,8 @@ The numeric fact IDs improve traceability, but they do not prove that the SQL it
 - Python 3.10 or later
 - A SQLite database populated with the GTFS tables described below
 - One LLM option:
-  - **Ollama (default):** Ollama installed, running, and a model available locally (`qwen3.5:4b` by default)
-  - **Groq (optional):** a Groq API key and available model quota
+  - **Groq (default):** a Groq API key and available model quota
+  - **Ollama (optional):** Ollama installed, running, and a model available locally (`qwen3.5:4b` by default)
 
 The repository does not include `railpulse.db`. Supply your own compatible GTFS database. The connector uses the `DATABASE_PATH` environment variable when set; otherwise, it looks for `railpulse.db` in the current working directory.
 
@@ -83,7 +83,7 @@ python -c "import os, sqlite3; c=sqlite3.connect(os.getenv('DATABASE_PATH', 'rai
 
 ### Choose an LLM provider
 
-**Ollama (default):** Install and start Ollama, then download the default model if needed:
+**Ollama (optional):** To use the local provider, install and start Ollama, then download the default model if needed:
 
 ```bash
 ollama pull qwen3.5:4b
@@ -91,7 +91,7 @@ ollama pull qwen3.5:4b
 
 The sidebar defaults to `http://localhost:11434` and model `qwen3.5:4b`; change these values there if your setup differs. If the model is missing, the app will report an Ollama model error until it is pulled.
 
-**Groq (optional):** To use Groq, select it in the sidebar and enter your API key there. Alternatively, set `GROQ_API_KEY` in the environment before launching. The app's Groq model selection is `openai/gpt-oss-20b`; usage depends on the available model quota.
+**Groq (default):** Enter your API key in the sidebar. Alternatively, set `GROQ_API_KEY` in the environment before launching. The app's Groq model selection is `openai/gpt-oss-20b`; usage depends on the available model quota.
 
 macOS / Linux:
 
