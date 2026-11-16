@@ -350,9 +350,10 @@ def format_station_review_briefing(sql_query, result_frame, facts):
         return None
     metrics = " and ".join(values)
     return (
-        f"**{station_name} station**\n\nThe matching GTFS records contain {metrics}. "
-        "These are feed-level schedule identifiers; this query does not establish a per-day count "
-        "or measure ridership, delays, crowding, or capacity.\n\n"
+        f"**Summary**\n\n{station_name}: {metrics} in the matching GTFS records.\n\n"
+        f"**{station_name} station review**\n\n"
+        "These are feed-level schedule identifiers. The data does not establish daily service, "
+        "ridership, delays, crowding, or station capacity.\n\n"
         "**Planning note**\n\nUse the counts as schedule-coverage context. Consult date-specific service, "
         "ridership, and operations data before making staffing or capacity decisions."
     )

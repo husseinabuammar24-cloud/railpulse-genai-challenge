@@ -33,7 +33,7 @@ Try asking:
 
 > Give me a brief review of Namur station using the GTFS results. Cite every number and state what the data does not tell us.
 
-The app drafts an analysis from the query results and Fact IDs. Inspect the source sections and Fact IDs in the app before relying on the draft. You can export the full conversation with **Download chat as PDF**.
+The app drafts an analysis with a short, Fact-ID-cited summary at the top, followed by the review, data limitations, and a cautious planning note. Inspect the source sections and Fact IDs in the app before relying on the draft. You can export the full conversation with **Download chat as PDF**.
 
 ## Requirements
 
