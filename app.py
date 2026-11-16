@@ -728,7 +728,7 @@ with st.sidebar:
             if str(state_key).startswith("catalog-drilldown-"):
                 del st.session_state[state_key]
         st.rerun()
-    provider = st.radio("LLM Backend", ["Groq (Cloud Free API)", "Ollama (Local)"], index=0)
+    provider = st.radio("LLM Backend", ["Groq (Cloud Free API)", "Ollama (Local)"], index=1)
     
     if provider == "Groq (Cloud Free API)":
         api_key = st.text_input("Groq API Key", type="password", value=os.getenv("GROQ_API_KEY", ""))
